@@ -8,6 +8,7 @@ that is not.
 |---|---|---|
 | `charts/gateway-fleet` | GatewayClass and EnvoyProxy per class; one Gateway per exposure, with its health listener, its `allowedListeners` rule, its baseline ClientTrafficPolicy and its NetworkPolicy | shipped |
 | `charts/gateway-groups` | One ListenerSet per project group, a listener and a Certificate per domain, an optional BackendTLSPolicy and the ingress rule that lets the gateway reach the group's workloads | shipped |
+| `charts/gateway-policies` | The policies that protect what the other two expose: a TLS floor on every Gateway unless it opts out, stricter TLS per listener, OIDC or JWT per protected route with an `authenticated` or `groups` posture and CSRF, BackendTLSPolicy for private-chain backends | new in v1.2.0 |
 
 Charts publish to `oci://ghcr.io/truvity/charts/<chart>` on every tag.
 
@@ -22,7 +23,7 @@ neutral default, and the consuming estate supplies it from its own (private)
 repository. `hack/leak-canary.sh` enforces this in CI, and public history
 cannot be unpublished — so the rule is mechanical, not remembered.
 
-## How the two charts fit together
+## How the charts fit together
 
 An **exposure** is one way in: a public entry point behind a tunnel or a load
 balancer, a private one on an internal address, later one that asks for a
@@ -45,6 +46,10 @@ GatewayClass  ── parametersRef ──►  EnvoyProxy
        ClientTrafficPolicy                optional BackendTLSPolicy
        NetworkPolicy
 ```
+
+`gateway-policies` protects both halves: its TLS floor selects every
+Gateway of a namespace, and its SecurityPolicies attach to the project's
+routes (or to a listener) by name.
 
 Two consequences worth stating, because both are load-bearing:
 
@@ -168,22 +173,59 @@ Hostnames are checked for uniqueness across the whole release, per exposure
 and port — two groups claiming one host is a listener conflict that takes
 both of them down, and it is not otherwise visible until it is live.
 
+## charts/gateway-policies
+
+```sh
+helm install policies oci://ghcr.io/truvity/charts/gateway-policies \
+  --namespace envoy-gateway-system \
+  --values policies-values.yaml
+```
+
+```yaml
+tlsBaseline:
+  namespaces: [envoy-gateway-system]   # on by default: TLS 1.2+, ECDHE AEAD ciphers
+
+defaults:
+  oidc:
+    issuer: https://id.example.com     # nothing signs in until this is set
+
+securityPolicies:
+  console:
+    namespace: example-console
+    targetRefs: [{name: console}]      # the project's HTTPRoute
+    oidc:
+      clientID: example-console
+      clientSecret: {name: example-console-client}   # key client-secret, yours to deliver
+      hostname: console.example.com
+    # csrf: shadow by default on a browser route; off, and only off, on a jwt one
+```
+
+Defaults: the TLS floor is **on**; CSRF is **shadow** on cookie-authenticated
+(OIDC) routes and refused on machine (JWT) routes; OIDC and JWT are **off**
+until given an issuer — an entry without one is refused, never rendered
+half-configured. Every value, the CSRF counters and the access-log fields
+that make shadow decisions reconstructable are documented in
+[charts/gateway-policies/README.md](charts/gateway-policies/README.md).
+
 ## Ownership contract
 
 | This repository | The consuming estate |
 |---|---|
-| GatewayClass, EnvoyProxy, Gateway, ListenerSet, Certificate, BackendTLSPolicy, ClientTrafficPolicy, NetworkPolicy — the objects and their relations | which hostnames exist, which namespaces may attach, which issuer signs, which address is pinned, which cloud annotations apply |
+| GatewayClass, EnvoyProxy, Gateway, ListenerSet, Certificate, BackendTLSPolicy, ClientTrafficPolicy, SecurityPolicy, NetworkPolicy — the objects and their relations | which hostnames exist, which namespaces may attach, which issuer signs, which address is pinned, which cloud annotations apply, which OIDC issuer and clients exist, and their secrets |
 | that two objects never silently share a name, a hostname or a Secret | DNS, tunnels, load balancers, trust distribution |
 | the defaults that make a partial values file render something coherent | the values themselves |
 
-Project charts own their HTTPRoutes and their backends; route-level policy
-(authentication, authorization, rate limits) belongs with the route, not here.
+Project charts own their HTTPRoutes and their backends. Authentication and
+authorization on a route are `gateway-policies` values, installed by
+whoever owns the grant — usually the platform, from the same catalogue row
+as the route's group; rate limits and other traffic policy stay with the
+route.
 
 ## Development
 
 ```sh
 devbox shell        # or direnv
-just check          # lint + golden renders + leak canary
+just check          # lint + golden renders + leak canary, for every chart
 just golden         # regenerate tests/golden after a template change — review the diff
 ```
 
