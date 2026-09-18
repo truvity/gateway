@@ -8,22 +8,22 @@ that is not.
 |---|---|---|
 | `charts/gateway-fleet` | GatewayClass and EnvoyProxy per class; one Gateway per exposure, with its health listener, its `allowedListeners` rule, its baseline ClientTrafficPolicy and its NetworkPolicy | shipped |
 | `charts/gateway-groups` | One ListenerSet per project group, a listener and a Certificate per domain, an optional BackendTLSPolicy and the ingress rule that lets the gateway reach the group's workloads | shipped |
-| `charts/gateway-policies` | The policies that protect what the other two expose: a TLS floor on every Gateway unless it opts out, stricter TLS per listener, OIDC or JWT per protected route with an `authenticated` or `groups` posture and CSRF, BackendTLSPolicy for private-chain backends | new in v1.2.0 |
+| `charts/gateway-policies` | The policies that protect what the other two expose: a TLS floor on every Gateway of a namespace unless it opts out, stricter TLS per listener, an OIDC or JWT SecurityPolicy per protected route with an `authenticated` or `groups` posture and CSRF, and BackendTLSPolicy for private-chain backends | shipped from v1.2.0 |
 
 Charts publish to `oci://ghcr.io/truvity/charts/<chart>` on every tag.
 
-The Envoy Gateway **controller** is not here: install it from upstream's
-`gateway-helm`. These charts own what it reconciles.
+## Who it is for
 
-## The rule that makes this repository public
+A platform team running Kubernetes with Envoy Gateway (1.9 or later, from
+upstream's `gateway-helm`), cert-manager and an issuer of its own, that
+wants its entry points — public, private, client-certificate — declared as
+data, each project's hostnames granted rather than self-served, and sign-in,
+token checks and TLS floors stated as policy rather than left to each
+application. The OIDC issuer and its clients are the estate's too. The
+Envoy Gateway **controller** is not here: these charts own what it
+reconciles.
 
-**Mechanism only.** Nothing here names an account, a zone, a hostname, a
-cluster, an issuer or a secret path. Every such thing is an input with a
-neutral default, and the consuming estate supplies it from its own (private)
-repository. `hack/leak-canary.sh` enforces this in CI, and public history
-cannot be unpublished — so the rule is mechanical, not remembered.
-
-## How the charts fit together
+## The model
 
 An **exposure** is one way in: a public entry point behind a tunnel or a load
 balancer, a private one on an internal address, later one that asks for a
@@ -47,9 +47,9 @@ GatewayClass  ── parametersRef ──►  EnvoyProxy
        NetworkPolicy
 ```
 
-`gateway-policies` protects both halves: its TLS floor selects every
-Gateway of a namespace, and its SecurityPolicies attach to the project's
-routes (or to a listener) by name.
+**Policies** protect both halves (`gateway-policies`): a TLS floor selects
+every Gateway of a namespace unless the Gateway opts out by label, and a
+SecurityPolicy attaches to a project's route — or a listener — by name.
 
 Two consequences worth stating, because both are load-bearing:
 
@@ -61,7 +61,9 @@ Two consequences worth stating, because both are load-bearing:
   own namespace, so a project cannot open a listener by creating an object in
   a namespace it controls.
 
-## charts/gateway-fleet
+## Install and a worked example
+
+All three charts come from one tag; pin them at the same version.
 
 ```sh
 helm install fleet oci://ghcr.io/truvity/charts/gateway-fleet \
@@ -104,28 +106,6 @@ exposures:
         healthCheckFailureDelay: 5s          # drain before the balancer notices
 ```
 
-| Value | Default | Notes |
-|---|---|---|
-| `controllerName` | `gateway.envoyproxy.io/gatewayclass-controller` | as installed by `gateway-helm` |
-| `classes.<n>.mergeGateways` | `false` | `true` shares one proxy across every Gateway of the class; no exposure may then bring its own |
-| `classes.<n>.proxy.enabled` | follows `mergeGateways` | a merged class needs its class proxy; a split one does not, because each exposure brings its own |
-| `exposures.<n>.class` | *required* | must name an enabled class |
-| `exposures.<n>.health.hostname` | *required* | exact, never a wildcard: a wildcard here would shadow every group |
-| `exposures.<n>.health.certificate.issuerRef.name` | *required* when the listener is HTTPS | the issuer is the estate's |
-| `exposures.<n>.health.directResponse.enabled` | `false` | answers without a backend, so the exposure can be probed when everything behind it is down |
-| `exposures.<n>.allowedListeners.namespaces.from` | `Same` | `None`, `Same`, `All` or `Selector` |
-| `exposures.<n>.proxy.service.clusterIP` | `""` | a pinned address; reaches the Service through the controller's patch hook |
-| `exposures.<n>.proxy.shutdown.healthCheckFailureDelay` | `""` | fail readiness this long before draining, so a load balancer removes the endpoint first |
-| `exposures.<n>.proxy.backendTLS.clientCertificateRef` | unset | the certificate Envoy presents to a backend that asks for one |
-| `exposures.<n>.proxy.accessLog.extraFields` | `{}` | fields added to the controller's default JSON access log (`name: command operator`); the default fields are rendered too, because a JSON format replaces the default instead of extending it. `%REQ_WITHOUT_QUERY(referer)%` keeps a URL-valued header's query string out of the log |
-| `exposures.<n>.clientTrafficPolicy.tls.clientValidation` | disabled | turns an exposure into one only a certificate holder can reach |
-| `exposures.<n>.networkPolicy` | disabled | rules are the estate's; only the xDS egress is structural, because without it the proxies never get a configuration |
-
-Cloud annotations, load-balancer classes, source ranges, issuers, addresses
-and scheduling are all inputs: only the estate knows those.
-
-## charts/gateway-groups
-
 ```sh
 helm install groups oci://ghcr.io/truvity/charts/gateway-groups \
   --namespace envoy-gateway-system \
@@ -156,24 +136,8 @@ groups:
             gateway.example.com/route-grant-argocd: "true"
 ```
 
-| Value | Default | Notes |
-|---|---|---|
-| `defaults` | see `values.yaml` | merged under every group, so a shared issuer or exposure is stated once |
-| `groups.<n>.parent.name` | *required* | the exposure's Gateway |
-| `groups.<n>.domains` | *required*, non-empty | a string, or an object giving one domain its own listener, Secret or issuer |
-| `groups.<n>.allowedRoutes.namespaces` | `from: Same` | a selector naming a label the platform writes is how a grant is expressed |
-| `groups.<n>.certificate.issuerRef.name` | *required* when HTTPS | per group or once in `defaults` |
-| `groups.<n>.backendTLS` | disabled | re-encrypt to the backend; `validation` is mandatory when enabled, because TLS that is never verified is not re-encryption |
-| `groups.<n>.networkPolicy` | disabled | the other half of the grant: the namespace label lets the route attach, this lets the packet arrive |
-
-One Certificate per domain, never one with every domain as a SAN: a group's
-domains are renamed and retired one at a time, and a SAN list cannot be.
-
-Hostnames are checked for uniqueness across the whole release, per exposure
-and port — two groups claiming one host is a listener conflict that takes
-both of them down, and it is not otherwise visible until it is live.
-
-## charts/gateway-policies
+A project then attaches an HTTPRoute to the ListenerSet `argocd` in the
+exposure's namespace, from a namespace carrying the grant label.
 
 ```sh
 helm install policies oci://ghcr.io/truvity/charts/gateway-policies \
@@ -182,50 +146,62 @@ helm install policies oci://ghcr.io/truvity/charts/gateway-policies \
 ```
 
 ```yaml
+# On by default, with no values at all: TLS 1.2 or later and the
+# forward-secret AEAD ciphers on every Gateway of the namespace, unless the
+# Gateway carries the label `tls-baseline-exempt`.
 tlsBaseline:
-  namespaces: [envoy-gateway-system]   # on by default: TLS 1.2+, ECDHE AEAD ciphers
+  namespaces: [envoy-gateway-system]
 
 defaults:
   oidc:
     issuer: https://id.example.com     # nothing signs in until this is set
 
 securityPolicies:
-  console:
-    namespace: example-console
-    targetRefs: [{name: console}]      # the project's HTTPRoute
+  argocd:
+    namespace: argocd
+    targetRefs: [{name: argocd}]       # the project's HTTPRoute
     oidc:
-      clientID: example-console
-      clientSecret: {name: example-console-client}   # key client-secret, yours to deliver
-      hostname: console.example.com
-    # csrf: shadow by default on a browser route; off, and only off, on a jwt one
+      clientID: example-argocd
+      clientSecret: {name: example-argocd-client}   # key client-secret; yours to deliver
+      hostname: argocd.example.com
+    # CSRF is in shadow on a sign-in route by default: counted, not refused.
 ```
 
-Defaults: the TLS floor is **on**; CSRF is **shadow** on cookie-authenticated
-(OIDC) routes and refused on machine (JWT) routes; OIDC and JWT are **off**
-until given an issuer — an entry without one is refused, never rendered
-half-configured. Every value, the CSRF counters and the access-log fields
-that make shadow decisions reconstructable are documented in
-[charts/gateway-policies/README.md](charts/gateway-policies/README.md).
+[docs/reference.md](docs/reference.md#gateway-policies) has a worked
+example with every kind of policy.
 
-## Ownership contract
+## Documentation
 
-| This repository | The consuming estate |
-|---|---|
-| GatewayClass, EnvoyProxy, Gateway, ListenerSet, Certificate, BackendTLSPolicy, ClientTrafficPolicy, SecurityPolicy, NetworkPolicy — the objects and their relations | which hostnames exist, which namespaces may attach, which issuer signs, which address is pinned, which cloud annotations apply, which OIDC issuer and clients exist, and their secrets |
-| that two objects never silently share a name, a hostname or a Secret | DNS, tunnels, load balancers, trust distribution |
-| the defaults that make a partial values file render something coherent | the values themselves |
+- [docs/adoption.md](docs/adoption.md) — prerequisites, install order, the
+  zero-diff gate, and upgrading across breaking releases
+- [docs/safety.md](docs/safety.md) — every render-time refusal and the
+  failure it prevents; the traps
+- [docs/reference.md](docs/reference.md) — every value of every chart
+- [docs/doctrine.md](docs/doctrine.md) — the split between the charts, the
+  three owners, and the ownership contract
+- [CHANGELOG.md](CHANGELOG.md) — what changed for a consumer, per version
 
-Project charts own their HTTPRoutes and their backends. Authentication and
-authorization on a route are `gateway-policies` values, installed by
-whoever owns the grant — usually the platform, from the same catalogue row
-as the route's group; rate limits and other traffic policy stay with the
-route.
+## The rule that makes this repository public
+
+**Mechanism only.** Nothing here names an account, a zone, a hostname, a
+cluster, an issuer or a secret path. Every such thing is an input with a
+neutral default, and the consuming estate supplies it from its own (private)
+repository. `hack/leak-canary.sh` enforces this in CI, and public history
+cannot be unpublished — so the rule is mechanical, not remembered.
+
+This repository follows the shared
+[component contract](https://github.com/truvity/ci-workflows/blob/master/docs/component-contract.md).
+
+## Status
+
+Used in production by its maintainers. Releases are listed on the
+[releases page](https://github.com/truvity/gateway/releases).
 
 ## Development
 
 ```sh
 devbox shell        # or direnv
-just check          # lint + golden renders + leak canary, for every chart
+just check          # lint + golden renders + leak canary
 just golden         # regenerate tests/golden after a template change — review the diff
 ```
 
@@ -238,6 +214,12 @@ that will quietly stop working.
 Push a tag `vX.Y.Z`. The shared release workflow creates the GitHub Release
 and pushes every chart at that version — a chart's own `version` field is a
 placeholder that never moves.
+
+Auto-release is present but not armed (`vars.AUTO_RELEASE` is unset), so
+every release today is a manual tag. When armed it cuts **patches only**:
+at once for a merged `security`-labelled pull request, weekly for
+dependency bumps. Minors and majors are always manual, tagged when the
+change merges and after its CHANGELOG heading.
 
 ## Licence
 
