@@ -1,3 +1,8 @@
+> **Deprecated.** This repository is superseded by `truvity/edge`. The Go
+> module `github.com/truvity/gateway` has moved to
+> `github.com/truvity/edge/v3/catalog`, and the charts are now published from
+> `truvity/edge` at 3.x. This path receives no further releases.
+
 # gateway
 
 Envoy Gateway for Kubernetes estates, as reusable mechanism: the plane the

@@ -1,3 +1,4 @@
+// Deprecated: moved to github.com/truvity/edge/v3/catalog (charts now published from truvity/edge at 3.x); this path receives no further releases.
 module github.com/truvity/gateway
 
 go 1.27.0
